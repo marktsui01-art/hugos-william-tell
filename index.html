@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Archer Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #222;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            color: white;
+            font-family: sans-serif;
+        }
+        canvas {
+            background-color: #333;
+            border: 2px solid #555;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <script>
+        /**
+         * Helper for Collision Detection
+         */
+        function checkCollision(rect1, rect2) {
+            return (
+                rect1.x < rect2.x + rect2.width &&
+                rect1.x + rect1.width > rect2.x &&
+                rect1.y < rect2.y + rect2.height &&
+                rect1.y + rect1.height > rect2.y
+            );
+        }
+
+        /**
+         * Represents the Target (Goal).
+         */
+        class Target {
+            constructor(game, x, y) {
+                this.game = game;
+                this.x = x;
+                this.y = y;
+                this.radius = 20;
+                this.active = true;
+            }
+
+            draw(ctx) {
+                if (!this.active) return;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = '#f1c40f'; // Gold
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // Bullseye
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius / 2, 0, Math.PI * 2);
+                ctx.fillStyle = '#e74c3c'; // Red
+                ctx.fill();
+            }
+        }
+
+        /**
+         * Represents an Enemy (Zombie).
+         */
+        class Enemy {
+            constructor(game, x, y) {
+                this.game = game;
+                this.x = x;
+                this.y = y;
+                this.width = 40;
+                this.height = 40;
+                this.speedX = -20; // Moves left towards player
+                this.markedForDeletion = false;
+            }
+
+            update(deltaTime) {
+                const dt = deltaTime / 1000;
+                this.x += this.speedX * dt;
+            }
+
+            draw(ctx) {
+                ctx.fillStyle = '#e74c3c'; // Red
+                ctx.fillRect(this.x, this.y, this.width, this.height);
+
+                // Eyes
+                ctx.fillStyle = 'black';
+                ctx.fillRect(this.x + 5, this.y + 10, 5, 5);
+                ctx.fillRect(this.x + 15, this.y + 10, 5, 5);
+            }
+        }
+
+        /**
+         * Represents an Arrow.
+         */
+        class Arrow {
+            constructor(game, x, y, angle, speed) {
+                this.game = game;
+                this.width = 20;
+                this.height = 5;
+                this.x = x;
+                this.y = y;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                this.gravity = 500; // Pixels per second squared
+                this.markedForDeletion = false;
+                this.elasticity = 0.7; // 30% speed loss
+            }
+
+            update(deltaTime) {
+                const dt = deltaTime / 1000;
+
+                // Apply Gravity
+                this.vy += this.gravity * dt;
+
+                // Move
+                this.x += this.vx * dt;
+                this.y += this.vy * dt;
+
+                // Collision with Enemies
+                this.game.enemies.forEach(enemy => {
+                    if (!enemy.markedForDeletion && checkCollision(this, enemy)) {
+                        enemy.markedForDeletion = true;
+                        this.markedForDeletion = true;
+                    }
+                });
+
+                // Collision with Target
+                if (this.game.target && this.game.target.active) {
+                    const t = this.game.target;
+                    // Circle-Rectangle collision approximation
+                    // Closest point on rectangle to circle center
+                    const closestX = Math.max(this.x, Math.min(t.x, this.x + this.width));
+                    const closestY = Math.max(this.y, Math.min(t.y, this.y + this.height));
+
+                    const distanceX = t.x - closestX;
+                    const distanceY = t.y - closestY;
+                    const distanceSquared = (distanceX * distanceX) + (distanceY * distanceY);
+
+                    if (distanceSquared < (t.radius * t.radius)) {
+                        this.markedForDeletion = true;
+                        this.game.onTargetHit();
+                    }
+                }
+
+                // Wall Collisions
+                this.game.walls.forEach(wall => {
+                    // Simple AABB collision check for bounce
+                    // This is a basic approximation for bouncing off static rects
+                    if (this.x < wall.x + wall.width &&
+                        this.x + this.width > wall.x &&
+                        this.y < wall.y + wall.height &&
+                        this.y + this.height > wall.y) {
+
+                        // Resolve collision based on overlap amount
+                        const overlapLeft = (this.x + this.width) - wall.x;
+                        const overlapRight = (wall.x + wall.width) - this.x;
+                        const overlapTop = (this.y + this.height) - wall.y;
+                        const overlapBottom = (wall.y + wall.height) - this.y;
+
+                        const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+                        if (minOverlap === overlapLeft) {
+                            this.x = wall.x - this.width;
+                            this.vx *= -this.elasticity;
+                        } else if (minOverlap === overlapRight) {
+                            this.x = wall.x + wall.width;
+                            this.vx *= -this.elasticity;
+                        } else if (minOverlap === overlapTop) {
+                            this.y = wall.y - this.height;
+                            this.vy *= -this.elasticity;
+                        } else if (minOverlap === overlapBottom) {
+                            this.y = wall.y + wall.height;
+                            this.vy *= -this.elasticity;
+                        }
+                    }
+                });
+
+                // Canvas Boundaries / Bounce Logic
+
+                // Floor
+                if (this.y + this.height > this.game.height) {
+                    this.y = this.game.height - this.height;
+                    this.vy *= -this.elasticity;
+                    this.vx *= this.elasticity; // Apply friction on floor bounce
+                }
+                // Ceiling
+                if (this.y < 0) {
+                    this.y = 0;
+                    this.vy *= -this.elasticity;
+                }
+                // Right Wall
+                if (this.x + this.width > this.game.width) {
+                    this.x = this.game.width - this.width;
+                    this.vx *= -this.elasticity;
+                }
+                // Left Wall
+                if (this.x < 0) {
+                    this.x = 0;
+                    this.vx *= -this.elasticity;
+                }
+
+                // Stop if very slow
+                if (Math.abs(this.vx) < 10 && Math.abs(this.vy) < 10 && this.y > this.game.height - 20) {
+                     this.markedForDeletion = true;
+                }
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x + this.width/2, this.y + this.height/2);
+                ctx.rotate(Math.atan2(this.vy, this.vx));
+                ctx.fillStyle = '#ffcc00';
+                ctx.fillRect(-this.width/2, -this.height/2, this.width, this.height);
+                ctx.restore();
+            }
+        }
+
+        /**
+         * Represents the player (archer).
+         */
+        class Player {
+            constructor(game) {
+                this.game = game;
+                this.width = 40;
+                this.height = 40;
+                this.x = 50;
+                this.y = this.game.height - this.height - 10; // Positioned on ground
+                this.angle = 0; // Radians, 0 is aiming right
+                this.aimSpeed = 2; // Radians per second
+                this.minAngle = -Math.PI / 2; // -90 degrees (up)
+                this.maxAngle = 0; // 0 degrees (right)
+
+                this.charging = false;
+                this.chargePower = 0;
+                this.maxCharge = 100;
+                this.chargeSpeed = 100; // Power per second
+            }
+
+            update(deltaTime) {
+                const dt = deltaTime / 1000; // Convert to seconds
+
+                // Aiming
+                if (this.game.input.keys.ArrowUp) {
+                    this.angle -= this.aimSpeed * dt;
+                }
+                if (this.game.input.keys.ArrowDown) {
+                    this.angle += this.aimSpeed * dt;
+                }
+
+                // Clamp angle
+                if (this.angle < this.minAngle) this.angle = this.minAngle;
+                if (this.angle > this.maxAngle) this.angle = this.maxAngle;
+
+                // Charging
+                if (this.game.input.keys.Space) {
+                    if (!this.charging) {
+                        this.charging = true;
+                        this.chargePower = 0;
+                    }
+                    this.chargePower += this.chargeSpeed * dt;
+                    if (this.chargePower > this.maxCharge) this.chargePower = this.maxCharge;
+                } else {
+                    if (this.charging) {
+                        // Release fire
+                        this.game.shootArrow(this.angle, this.chargePower);
+                        this.charging = false;
+                        this.chargePower = 0;
+                    }
+                }
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
+
+                // Draw Body
+                ctx.fillStyle = '#4a90e2';
+                ctx.fillRect(-this.width / 2, -this.height / 2, this.width, this.height);
+
+                // Draw Bow/Aim Line
+                ctx.rotate(this.angle);
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(0, -2, 40, 4); // Simple stick bow aiming out
+
+                ctx.restore();
+
+                // Draw Charge Bar
+                if (this.charging) {
+                    ctx.fillStyle = 'red';
+                    ctx.fillRect(this.x, this.y - 20, (this.chargePower / this.maxCharge) * this.width, 5);
+                    ctx.strokeStyle = 'white';
+                    ctx.strokeRect(this.x, this.y - 20, this.width, 5);
+                }
+            }
+        }
+
+        /**
+         * Handles user input.
+         */
+        class InputHandler {
+            constructor() {
+                this.keys = {
+                    ArrowUp: false,
+                    ArrowDown: false,
+                    Space: false
+                };
+
+                window.addEventListener('keydown', (e) => {
+                    if (e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'Space') {
+                        this.keys[e.code] = true;
+                    }
+                });
+
+                window.addEventListener('keyup', (e) => {
+                    if (e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'Space') {
+                        this.keys[e.code] = false;
+                    }
+                });
+            }
+        }
+
+        /**
+         * Main Game Class
+         * Manages the game loop, initialization, and rendering.
+         */
+        class Game {
+            /**
+             * @param {HTMLCanvasElement} canvas
+             */
+            constructor(canvas) {
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d');
+                this.width = canvas.width;
+                this.height = canvas.height;
+                this.lastTime = 0;
+                this.input = new InputHandler();
+                this.player = new Player(this);
+                this.arrows = [];
+                this.enemies = [];
+                this.walls = [];
+                this.target = null;
+
+                this.currentLevel = 1;
+                this.ammo = 5;
+                this.canShoot = true;
+                this.gameOver = false;
+                this.victory = false;
+                this.gameMessage = '';
+                this.transitionTimer = 0;
+
+                this.loadLevel(this.currentLevel);
+            }
+
+            loadLevel(levelIndex) {
+                this.currentLevel = levelIndex;
+                this.resetState();
+
+                if (levelIndex === 1) {
+                    // Level 1: Beginner
+                    // Enemies
+                    this.enemies.push(new Enemy(this, 500, this.height - 50));
+                    this.enemies.push(new Enemy(this, 700, this.height - 50));
+                    // Target
+                    this.target = new Target(this, 750, 200);
+                } else if (levelIndex === 2) {
+                    // Level 2: Harder
+                    // Wall Obstacle
+                    this.walls.push({x: 400, y: 300, width: 20, height: 300}); // Tall wall in middle
+
+                    // Enemies
+                    this.enemies.push(new Enemy(this, 300, this.height - 50));
+                    this.enemies.push(new Enemy(this, 600, this.height - 50));
+                    this.enemies.push(new Enemy(this, 750, this.height - 50));
+
+                    // Target behind wall
+                    this.target = new Target(this, 750, 500);
+                } else {
+                    // End of Game
+                    this.gameMessage = "YOU WIN THE GAME!";
+                    this.victory = true;
+                    this.gameOver = true;
+                }
+            }
+
+            resetState() {
+                this.arrows = [];
+                this.enemies = [];
+                this.walls = [];
+                this.target = null;
+                this.ammo = 5;
+                this.canShoot = true;
+                this.gameOver = false;
+                this.victory = false;
+                this.gameMessage = '';
+                this.transitionTimer = 0;
+            }
+
+            shootArrow(angle, power) {
+                if (!this.canShoot || this.ammo <= 0) return;
+
+                this.ammo--;
+                // Determine speed based on power (0-100)
+                const speed = power * 10; // Max speed 1000
+                // Spawn arrow at player position
+                const spawnX = this.player.x + this.player.width / 2;
+                const spawnY = this.player.y + this.player.height / 2;
+                this.arrows.push(new Arrow(this, spawnX, spawnY, angle, speed));
+
+                this.checkAmmoStatus();
+            }
+
+            checkAmmoStatus() {
+                if (this.ammo === 0) {
+                     // Wait to see if arrows hit anything
+                     setTimeout(() => {
+                         if (this.enemies.length > 0 || (this.target && this.target.active)) {
+                             // Only trigger lose condition if we haven't won yet
+                             if (!this.victory) {
+                                 this.canShoot = false;
+                                 this.gameMessage = "Out of Arrows! Waiting for defeat...";
+                             }
+                         }
+                     }, 2000); // Small buffer to let arrows fly
+                }
+            }
+
+            onTargetHit() {
+                if (this.enemies.length > 0) {
+                    // Fail Condition: Target hit before enemies cleared
+                    this.canShoot = false;
+                    this.gameMessage = "Target hit too early! Waiting for defeat...";
+                } else {
+                    // Win Condition
+                    this.victory = true;
+                    this.gameOver = true;
+                    this.gameMessage = "VICTORY!";
+                    // Schedule next level
+                    setTimeout(() => {
+                        this.loadLevel(this.currentLevel + 1);
+                    }, 3000);
+                }
+            }
+
+            /**
+             * Starts the game loop.
+             */
+            start() {
+                requestAnimationFrame(this.gameLoop.bind(this));
+            }
+
+            /**
+             * The main game loop.
+             * @param {number} timestamp
+             */
+            gameLoop(timestamp) {
+                const deltaTime = timestamp - this.lastTime;
+                this.lastTime = timestamp;
+
+                this.update(deltaTime);
+                this.draw();
+
+                requestAnimationFrame(this.gameLoop.bind(this));
+            }
+
+            /**
+             * Updates game logic.
+             * @param {number} deltaTime
+             */
+            update(deltaTime) {
+                if (this.gameOver && this.victory && this.currentLevel > 2) return; // Full game completion
+
+                this.player.update(deltaTime);
+
+                this.arrows.forEach(arrow => arrow.update(deltaTime));
+                this.arrows = this.arrows.filter(arrow => !arrow.markedForDeletion);
+
+                this.enemies.forEach(enemy => {
+                    enemy.update(deltaTime);
+                    // Check collision with player
+                    if (checkCollision(this.player, enemy) && !this.gameOver) {
+                        this.gameOver = true;
+                        this.canShoot = false;
+                        this.gameMessage = "GAME OVER";
+                        setTimeout(() => {
+                            if (!this.victory) this.loadLevel(this.currentLevel); // Restart if lost
+                        }, 3000);
+                    }
+                });
+                this.enemies = this.enemies.filter(enemy => !enemy.markedForDeletion);
+            }
+
+            /**
+             * Renders the game.
+             */
+            draw() {
+                // Clear screen
+                this.ctx.fillStyle = '#333';
+                this.ctx.fillRect(0, 0, this.width, this.height);
+
+                // Draw Walls
+                this.ctx.fillStyle = '#7f8c8d';
+                this.walls.forEach(wall => {
+                    this.ctx.fillRect(wall.x, wall.y, wall.width, wall.height);
+                });
+
+                // Draw World Objects
+                if (this.target) this.target.draw(this.ctx);
+
+                this.player.draw(this.ctx);
+                this.enemies.forEach(enemy => enemy.draw(this.ctx));
+                this.arrows.forEach(arrow => arrow.draw(this.ctx));
+
+                // UI Overlay
+                this.ctx.fillStyle = 'white';
+                this.ctx.font = '20px sans-serif';
+                this.ctx.textAlign = 'left';
+                this.ctx.fillText(`Ammo: ${this.ammo}`, 10, 30);
+                this.ctx.fillText(`Level: ${this.currentLevel}`, 10, 60);
+
+                if (this.gameMessage) {
+                    this.ctx.save();
+                    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                    this.ctx.fillRect(0, 0, this.width, this.height);
+
+                    this.ctx.fillStyle = this.victory ? '#2ecc71' : '#e74c3c';
+                    this.ctx.font = '40px sans-serif';
+                    this.ctx.textAlign = 'center';
+                    this.ctx.fillText(this.gameMessage, this.width / 2, this.height / 2);
+
+                    if (!this.victory && this.gameOver) {
+                        this.ctx.fillStyle = 'white';
+                        this.ctx.font = '20px sans-serif';
+                        this.ctx.fillText("Restarting...", this.width / 2, this.height / 2 + 50);
+                    }
+                    this.ctx.restore();
+                }
+            }
+        }
+
+        // Initialize the game when the window loads
+        window.addEventListener('load', () => {
+            const canvas = document.getElementById('gameCanvas');
+            const game = new Game(canvas);
+            game.start();
+        });
+    </script>
+</body>
+</html>
