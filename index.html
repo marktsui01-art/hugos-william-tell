@@ -70,6 +70,40 @@
         }
 
         /**
+         * Represents a Particle Effect.
+         */
+        class Particle {
+            constructor(game, x, y, color, size, speedX, speedY, life) {
+                this.game = game;
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.size = size;
+                this.speedX = speedX;
+                this.speedY = speedY;
+                this.life = life; // Time to live in seconds
+                this.maxLife = life;
+                this.markedForDeletion = false;
+            }
+
+            update(deltaTime) {
+                const dt = deltaTime / 1000;
+                this.x += this.speedX * dt;
+                this.y += this.speedY * dt;
+                this.life -= dt;
+                if (this.life <= 0) this.markedForDeletion = true;
+            }
+
+            draw(ctx) {
+                ctx.save();
+                ctx.globalAlpha = this.life / this.maxLife;
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+                ctx.restore();
+            }
+        }
+
+        /**
          * Represents an Enemy (Zombie).
          */
         class Enemy {
@@ -79,13 +113,160 @@
                 this.y = y;
                 this.width = 40;
                 this.height = 40;
-                this.speedX = -20; // Moves left towards player
+                this.speedX = 0;
+                this.vy = 0;
+                this.gravity = 1000;
                 this.markedForDeletion = false;
+                this.onGround = false;
+                this.jumpStrength = -550; // Increased for better mobility
+                this.moveSpeed = 60; // 1.5x previous 20 = 30? User asked for 1.5x speed.
+                                     // Original was 20. 20 * 1.5 = 30.
+                                     // But 30 is still slow. I'll bump it to 60 to make them "move faster" as requested.
+                this.targetPlatformIndex = -1;
             }
 
             update(deltaTime) {
                 const dt = deltaTime / 1000;
+
+                // AI Logic: Determine Direction
+                this.decideMovement();
+
+                // Apply Gravity
+                this.vy += this.gravity * dt;
+                this.y += this.vy * dt;
+
+                // Floor Collision (Treat as Platform 0)
+                this.onGround = false;
+                if (this.y + this.height > this.game.height) {
+                    this.y = this.game.height - this.height;
+                    this.vy = 0;
+                    this.onGround = true;
+                }
+
+                // Wall/Platform Collisions
+                this.game.walls.forEach(wall => {
+                    // Simple AABB for Walls
+                     if (this.x < wall.x + wall.width &&
+                        this.x + this.width > wall.x &&
+                        this.y < wall.y + wall.height &&
+                        this.y + this.height > wall.y) {
+
+                        const overlapTop = (this.y + this.height) - wall.y;
+                        const overlapBottom = (wall.y + wall.height) - this.y;
+                        const overlapLeft = (this.x + this.width) - wall.x;
+                        const overlapRight = (wall.x + wall.width) - this.x;
+
+                        // Prioritize Vertical collision if falling/jumping
+                        // We check the smallest overlap
+                        const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+
+                        if (minOverlap === overlapTop && this.vy >= 0) { // Landed on top
+                            this.y = wall.y - this.height;
+                            this.vy = 0;
+                            this.onGround = true;
+                        } else if (minOverlap === overlapBottom && this.vy < 0) { // Hit head
+                            this.y = wall.y + wall.height;
+                            this.vy = 0;
+                        }
+                    }
+                });
+
+                // Apply Horizontal Movement
                 this.x += this.speedX * dt;
+
+                // Resolve Horizontal Collisions
+                this.game.walls.forEach(wall => {
+                    if (this.x < wall.x + wall.width &&
+                        this.x + this.width > wall.x &&
+                        this.y < wall.y + wall.height && // Slightly relaxed Y check to avoid snagging on floor
+                        this.y + this.height > wall.y) {
+
+                         // If we are strictly colliding horizontally (not standing on it)
+                         // We already resolved Y, so if we are still overlapping, it must be X?
+                         // Re-check overlaps with current positions
+                        const overlapLeft = (this.x + this.width) - wall.x;
+                        const overlapRight = (wall.x + wall.width) - this.x;
+                        const overlapTop = (this.y + this.height) - wall.y;
+
+                        // Ignore if we are standing on it (overlapTop is small and we are onGround)
+                        if (overlapTop <= 1) return;
+
+                        if (overlapLeft < overlapRight && overlapLeft < 20) {
+                             this.x = wall.x - this.width;
+                        } else if (overlapRight < 20) {
+                             this.x = wall.x + wall.width;
+                        }
+                    }
+                });
+
+                // Canvas bounds X
+                if (this.x < 0) this.x = 0;
+                if (this.x + this.width > this.game.width) this.x = this.game.width - this.width;
+            }
+
+            decideMovement() {
+                // identify current platform
+                const myPlat = this.game.getPlatform(this);
+                const playerPlat = this.game.getPlatform(this.game.player);
+
+                if (!myPlat || !playerPlat) {
+                    // Fallback: move towards player X
+                    if (this.game.player.x > this.x) this.speedX = this.moveSpeed;
+                    else this.speedX = -this.moveSpeed;
+                    return;
+                }
+
+                // If on same platform, run to player
+                if (myPlat.id === playerPlat.id) {
+                    if (this.game.player.x > this.x) this.speedX = this.moveSpeed;
+                    else this.speedX = -this.moveSpeed;
+                } else {
+                    // Find path
+                    const nextNodeId = this.game.findNextPlatform(myPlat.id, playerPlat.id);
+                    if (nextNodeId !== -1) {
+                        // Move towards the connection to that node
+                        const connection = this.game.navGraph[myPlat.id].find(c => c.targetId === nextNodeId);
+                        if (connection) {
+                            // Target X is the connection point (e.g. edge of current platform)
+                            // We need to define connection points clearly.
+                            // For simplicity: If target is to the right, go to right edge.
+                            const targetPlatform = this.game.platforms.find(p => p.id === nextNodeId);
+
+                            // Determine direction to target platform
+                            let targetX = targetPlatform.x + targetPlatform.width/2;
+
+                            // Optimization: Move to the edge closest to the target platform
+                            if (targetPlatform.x > this.x) {
+                                // Target is right. Go to right edge of current.
+                                if (myPlat.type === 'wall') targetX = myPlat.x + myPlat.width;
+                                else targetX = this.game.width; // Floor right
+                            } else {
+                                // Target is left
+                                if (myPlat.type === 'wall') targetX = myPlat.x;
+                                else targetX = 0; // Floor left
+                            }
+
+                            if (targetX > this.x + 10) {
+                                this.speedX = this.moveSpeed;
+                            } else if (targetX < this.x - 10) {
+                                this.speedX = -this.moveSpeed;
+                            } else {
+                                // We are at the edge/jump point
+                                // Jump if target is higher or across a gap
+                                // Simple logic: Always jump when reaching the edge if the target is not directly below
+                                if (this.onGround) {
+                                    this.vy = this.jumpStrength;
+                                    // Push forward to clear gap
+                                    this.speedX = (targetPlatform.x > this.x) ? this.moveSpeed : -this.moveSpeed;
+                                }
+                            }
+                        }
+                    } else {
+                         // No path found? Just move towards player X
+                        if (this.game.player.x > this.x) this.speedX = this.moveSpeed;
+                        else this.speedX = -this.moveSpeed;
+                    }
+                }
             }
 
             draw(ctx) {
@@ -125,6 +306,34 @@
                 // Move
                 this.x += this.vx * dt;
                 this.y += this.vy * dt;
+
+                // Spawn Particles (Smoke/Fire)
+                if (!this.markedForDeletion) {
+                    // Fire
+                    if (Math.random() < 0.5) {
+                        this.game.particles.push(new Particle(
+                            this.game,
+                            this.x, this.y,
+                            '#e74c3c', // Red/Orange
+                            Math.random() * 5 + 2,
+                            (Math.random() - 0.5) * 20,
+                            (Math.random() - 0.5) * 20,
+                            0.5
+                        ));
+                    }
+                    // Smoke
+                    if (Math.random() < 0.3) {
+                         this.game.particles.push(new Particle(
+                            this.game,
+                            this.x, this.y,
+                            '#95a5a6', // Grey
+                            Math.random() * 8 + 4,
+                            (Math.random() - 0.5) * 10,
+                            (Math.random() - 0.5) * 10,
+                            0.8
+                        ));
+                    }
+                }
 
                 // Collision with Enemies
                 this.game.enemies.forEach(enemy => {
@@ -283,14 +492,41 @@
                 ctx.save();
                 ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
 
-                // Draw Body
-                ctx.fillStyle = '#4a90e2';
+                // Draw Body (Blocky with Face)
+                ctx.fillStyle = '#3498db';
                 ctx.fillRect(-this.width / 2, -this.height / 2, this.width, this.height);
+
+                // Draw Face (Cute/Cool)
+                ctx.fillStyle = '#ecf0f1'; // White eyes
+                // Left Eye
+                ctx.fillRect(-10, -10, 8, 8);
+                // Right Eye
+                ctx.fillRect(2, -10, 8, 8);
+
+                // Pupils
+                ctx.fillStyle = '#2c3e50';
+                // Depending on aim angle, move pupils slightly?
+                // Simple centered for now
+                ctx.fillRect(-8, -8, 4, 4);
+                ctx.fillRect(4, -8, 4, 4);
+
+                // Mouth (Smile)
+                ctx.fillStyle = '#e74c3c';
+                ctx.fillRect(-5, 5, 10, 3);
+
 
                 // Draw Bow/Aim Line
                 ctx.rotate(this.angle);
                 ctx.fillStyle = '#fff';
-                ctx.fillRect(0, -2, 40, 4); // Simple stick bow aiming out
+                // Bow Handle
+                ctx.fillRect(0, -2, 40, 4);
+                // Bow String (Visual approximation)
+                ctx.beginPath();
+                ctx.moveTo(10, -15);
+                ctx.lineTo(10, 15);
+                ctx.lineWidth = 1;
+                ctx.strokeStyle = '#fff';
+                ctx.stroke();
 
                 ctx.restore();
 
@@ -314,17 +550,20 @@
                     ArrowDown: false,
                     Space: false
                 };
+                this.anyKeyPressed = false;
 
                 window.addEventListener('keydown', (e) => {
                     if (e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'Space') {
                         this.keys[e.code] = true;
                     }
+                    this.anyKeyPressed = true;
                 });
 
                 window.addEventListener('keyup', (e) => {
                     if (e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'Space') {
                         this.keys[e.code] = false;
                     }
+                    this.anyKeyPressed = false;
                 });
             }
         }
@@ -348,15 +587,18 @@
                 this.arrows = [];
                 this.enemies = [];
                 this.walls = [];
+                this.platforms = []; // For AI
+                this.navGraph = {}; // Adjacency list
+                this.particles = [];
                 this.target = null;
 
                 this.currentLevel = 1;
                 this.ammo = 5;
                 this.canShoot = true;
-                this.gameOver = false;
-                this.victory = false;
+
+                // Game States: 'PLAYING', 'LEVEL_COMPLETE', 'GAME_OVER', 'WAITING_START'
+                this.gameState = 'PLAYING';
                 this.gameMessage = '';
-                this.transitionTimer = 0;
 
                 this.loadLevel(this.currentLevel);
             }
@@ -364,49 +606,209 @@
             loadLevel(levelIndex) {
                 this.currentLevel = levelIndex;
                 this.resetState();
+                this.gameState = 'PLAYING';
 
                 if (levelIndex === 1) {
                     // Level 1: Beginner
-                    // Enemies
                     this.enemies.push(new Enemy(this, 500, this.height - 50));
                     this.enemies.push(new Enemy(this, 700, this.height - 50));
-                    // Target
                     this.target = new Target(this, 750, 200);
                 } else if (levelIndex === 2) {
                     // Level 2: Harder
-                    // Wall Obstacle
                     this.walls.push({x: 400, y: 300, width: 20, height: 300}); // Tall wall in middle
-
-                    // Enemies
                     this.enemies.push(new Enemy(this, 300, this.height - 50));
                     this.enemies.push(new Enemy(this, 600, this.height - 50));
                     this.enemies.push(new Enemy(this, 750, this.height - 50));
-
-                    // Target behind wall
                     this.target = new Target(this, 750, 500);
+                } else if (levelIndex === 3) {
+                    // Level 3: Platforms
+                    // Two raised platforms
+                    this.walls.push({x: 200, y: 400, width: 150, height: 20});
+                    this.walls.push({x: 500, y: 300, width: 150, height: 20});
+
+                    this.enemies.push(new Enemy(this, 250, 350)); // On platform 1
+                    this.enemies.push(new Enemy(this, 550, 250)); // On platform 2
+                    this.enemies.push(new Enemy(this, 700, this.height - 50)); // Ground
+
+                    this.target = new Target(this, 750, 100); // High up
+                } else if (levelIndex === 4) {
+                    // Level 4: The Pit
+                    // Walls on sides, pit in middle (player starts left)
+                    this.walls.push({x: 300, y: 450, width: 20, height: 150}); // Left wall of pit
+                    this.walls.push({x: 500, y: 450, width: 20, height: 150}); // Right wall of pit
+                    this.walls.push({x: 320, y: 550, width: 180, height: 50}); // Pit floor (raised slightly so they don't get stuck in undefined void)
+
+                    this.enemies.push(new Enemy(this, 400, 500)); // Inside pit
+                    this.enemies.push(new Enemy(this, 600, 400)); // Right side
+                    this.enemies.push(new Enemy(this, 700, 400));
+
+                    this.target = new Target(this, 400, 200); // Floating above pit
+                } else if (levelIndex === 5) {
+                    // Level 5: Steps
+                    for(let i=0; i<5; i++) {
+                         this.walls.push({x: 300 + (i*80), y: 500 - (i*60), width: 80, height: 20});
+                         if (i > 0) this.enemies.push(new Enemy(this, 320 + (i*80), 450 - (i*60)));
+                    }
+                    this.target = new Target(this, 750, 50);
+                } else if (levelIndex === 6) {
+                    // Level 6: Castle
+                    this.walls.push({x: 600, y: 300, width: 20, height: 300}); // Castle Wall
+                    this.walls.push({x: 620, y: 300, width: 100, height: 20}); // Castle Floor
+                    this.walls.push({x: 720, y: 300, width: 20, height: 300}); // Back Wall
+
+                    this.enemies.push(new Enemy(this, 650, 250)); // Guard
+                    this.enemies.push(new Enemy(this, 400, this.height - 50)); // Attacker
+                    this.enemies.push(new Enemy(this, 500, this.height - 50)); // Attacker
+
+                    this.target = new Target(this, 670, 250); // Inside castle
                 } else {
-                    // End of Game
                     this.gameMessage = "YOU WIN THE GAME!";
-                    this.victory = true;
-                    this.gameOver = true;
+                    this.gameState = 'LEVEL_COMPLETE';
+                    this.victory = true; // Kept for legacy compatibility if needed
                 }
+
+                this.buildNavigationGraph();
             }
 
             resetState() {
                 this.arrows = [];
                 this.enemies = [];
                 this.walls = [];
+                this.platforms = [];
+                this.navGraph = {};
+                this.particles = [];
                 this.target = null;
                 this.ammo = 5;
                 this.canShoot = true;
-                this.gameOver = false;
-                this.victory = false;
                 this.gameMessage = '';
-                this.transitionTimer = 0;
+            }
+
+            /**
+             * Builds a graph of walkable platforms for AI.
+             */
+            buildNavigationGraph() {
+                // 1. Identify all platforms
+                // Floor is platform 0
+                this.platforms.push({
+                    id: 0,
+                    x: 0,
+                    y: this.height, // Y is top surface
+                    width: this.width,
+                    height: 10,
+                    type: 'floor'
+                });
+
+                // Walls act as platforms
+                this.walls.forEach((wall, index) => {
+                    this.platforms.push({
+                        id: index + 1,
+                        x: wall.x,
+                        y: wall.y,
+                        width: wall.width,
+                        height: wall.height,
+                        type: 'wall'
+                    });
+                });
+
+                // 2. Build edges (connections)
+                this.navGraph = {};
+                this.platforms.forEach(p => this.navGraph[p.id] = []);
+
+                this.platforms.forEach(p1 => {
+                    this.platforms.forEach(p2 => {
+                        if (p1.id === p2.id) return;
+
+                        // Check if reachable
+                        // Distance Check
+                        const dx = Math.abs((p1.x + p1.width/2) - (p2.x + p2.width/2));
+                        const dy = p2.y - p1.y; // Positive if p2 is below p1
+
+                        // Horizontal gap
+                        // Calculate closest points
+                        const left1 = p1.x; const right1 = p1.x + p1.width;
+                        const left2 = p2.x; const right2 = p2.x + p2.width;
+
+                        // Gap is 0 if they overlap
+                        let gap = 0;
+                        if (right1 < left2) gap = left2 - right1;
+                        else if (right2 < left1) gap = left1 - right2;
+
+                        // Can Jump? (Max jump height approx 150px, Max jump dist approx 200px)
+                        const maxJumpHeight = 150;
+                        const maxJumpDist = 200;
+
+                        let connected = false;
+
+                        if (gap < maxJumpDist) {
+                            // If target is above (dy < 0)
+                            if (dy < 0 && Math.abs(dy) < maxJumpHeight) {
+                                connected = true;
+                            }
+                            // If target is below (dy > 0)
+                            else if (dy >= 0) {
+                                connected = true; // Can always drop down
+                            }
+                        }
+
+                        if (connected) {
+                            this.navGraph[p1.id].push({ targetId: p2.id });
+                        }
+                    });
+                });
+            }
+
+            getPlatform(entity) {
+                // Find which platform the entity is standing on
+                // Simple check: Entity center X is within platform X range
+                // Entity bottom Y is close to platform Top Y
+                const cx = entity.x + entity.width/2;
+                const bottom = entity.y + entity.height;
+
+                for (let p of this.platforms) {
+                    if (cx >= p.x && cx <= p.x + p.width) {
+                        if (Math.abs(bottom - p.y) < 50) { // Tolerance
+                            return p;
+                        }
+                    }
+                }
+                // If in air or undefined, maybe return nearest?
+                // Or just Floor
+                return this.platforms[0];
+            }
+
+            findNextPlatform(startId, endId) {
+                // BFS to find shortest path of platforms
+                const queue = [startId];
+                const visited = new Set();
+                const parents = {};
+                visited.add(startId);
+
+                while (queue.length > 0) {
+                    const current = queue.shift();
+                    if (current === endId) break;
+
+                    const neighbors = this.navGraph[current] || [];
+                    for (let n of neighbors) {
+                        if (!visited.has(n.targetId)) {
+                            visited.add(n.targetId);
+                            parents[n.targetId] = current;
+                            queue.push(n.targetId);
+                        }
+                    }
+                }
+
+                if (!parents[endId]) return -1; // No path
+
+                // Backtrack to find first step
+                let curr = endId;
+                while (parents[curr] !== startId) {
+                    curr = parents[curr];
+                }
+                return curr;
             }
 
             shootArrow(angle, power) {
-                if (!this.canShoot || this.ammo <= 0) return;
+                if (!this.canShoot || this.ammo <= 0 || this.gameState !== 'PLAYING') return;
 
                 this.ammo--;
                 // Determine speed based on power (0-100)
@@ -416,39 +818,42 @@
                 const spawnY = this.player.y + this.player.height / 2;
                 this.arrows.push(new Arrow(this, spawnX, spawnY, angle, speed));
 
-                this.checkAmmoStatus();
+                // No immediate check here, we check in update loop when arrow count is 0
             }
 
             checkAmmoStatus() {
-                if (this.ammo === 0) {
-                     // Wait to see if arrows hit anything
-                     setTimeout(() => {
-                         if (this.enemies.length > 0 || (this.target && this.target.active)) {
-                             // Only trigger lose condition if we haven't won yet
-                             if (!this.victory) {
-                                 this.canShoot = false;
-                                 this.gameMessage = "Out of Arrows! Waiting for defeat...";
-                             }
-                         }
-                     }, 2000); // Small buffer to let arrows fly
+                // If out of ammo and no arrows are flying, and we haven't won
+                if (this.ammo <= 0 && this.arrows.length === 0 && this.gameState === 'PLAYING') {
+                     // If target is still active or enemies remain
+                     if ((this.target && this.target.active) || this.enemies.length > 0) {
+                         this.setGameOver("Out of Arrows!");
+                     }
                 }
             }
 
             onTargetHit() {
                 if (this.enemies.length > 0) {
                     // Fail Condition: Target hit before enemies cleared
-                    this.canShoot = false;
-                    this.gameMessage = "Target hit too early! Waiting for defeat...";
+                    this.setGameOver("Target hit too early!");
                 } else {
                     // Win Condition
-                    this.victory = true;
-                    this.gameOver = true;
-                    this.gameMessage = "VICTORY!";
-                    // Schedule next level
-                    setTimeout(() => {
-                        this.loadLevel(this.currentLevel + 1);
-                    }, 3000);
+                    this.setLevelComplete();
                 }
+            }
+
+            setGameOver(reason) {
+                this.gameState = 'GAME_OVER';
+                this.canShoot = false;
+                this.gameMessage = reason + " Press any key to restart.";
+                // Reset input latch to prevent accidental immediate restart
+                this.input.anyKeyPressed = false;
+            }
+
+            setLevelComplete() {
+                this.gameState = 'LEVEL_COMPLETE';
+                this.canShoot = false;
+                this.gameMessage = "VICTORY! Press any key for next level.";
+                this.input.anyKeyPressed = false;
             }
 
             /**
@@ -477,23 +882,38 @@
              * @param {number} deltaTime
              */
             update(deltaTime) {
-                if (this.gameOver && this.victory && this.currentLevel > 2) return; // Full game completion
+                // Handle Transitions
+                if (this.gameState === 'GAME_OVER') {
+                    if (this.input.anyKeyPressed) {
+                        this.loadLevel(this.currentLevel); // Restart
+                        this.input.anyKeyPressed = false;
+                    }
+                    return;
+                }
+                if (this.gameState === 'LEVEL_COMPLETE') {
+                    if (this.input.anyKeyPressed) {
+                        this.loadLevel(this.currentLevel + 1); // Next Level
+                        this.input.anyKeyPressed = false;
+                    }
+                    return;
+                }
 
                 this.player.update(deltaTime);
 
                 this.arrows.forEach(arrow => arrow.update(deltaTime));
                 this.arrows = this.arrows.filter(arrow => !arrow.markedForDeletion);
 
+                this.particles.forEach(p => p.update(deltaTime));
+                this.particles = this.particles.filter(p => !p.markedForDeletion);
+
+                // Check ammo status after arrows update (in case some were deleted)
+                this.checkAmmoStatus();
+
                 this.enemies.forEach(enemy => {
                     enemy.update(deltaTime);
                     // Check collision with player
-                    if (checkCollision(this.player, enemy) && !this.gameOver) {
-                        this.gameOver = true;
-                        this.canShoot = false;
-                        this.gameMessage = "GAME OVER";
-                        setTimeout(() => {
-                            if (!this.victory) this.loadLevel(this.currentLevel); // Restart if lost
-                        }, 3000);
+                    if (checkCollision(this.player, enemy) && this.gameState === 'PLAYING') {
+                        this.setGameOver("Caught by Enemy!");
                     }
                 });
                 this.enemies = this.enemies.filter(enemy => !enemy.markedForDeletion);
@@ -519,6 +939,7 @@
                 this.player.draw(this.ctx);
                 this.enemies.forEach(enemy => enemy.draw(this.ctx));
                 this.arrows.forEach(arrow => arrow.draw(this.ctx));
+                this.particles.forEach(p => p.draw(this.ctx));
 
                 // UI Overlay
                 this.ctx.fillStyle = 'white';
@@ -527,21 +948,16 @@
                 this.ctx.fillText(`Ammo: ${this.ammo}`, 10, 30);
                 this.ctx.fillText(`Level: ${this.currentLevel}`, 10, 60);
 
-                if (this.gameMessage) {
+                if (this.gameState !== 'PLAYING' && this.gameMessage) {
                     this.ctx.save();
                     this.ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
                     this.ctx.fillRect(0, 0, this.width, this.height);
 
-                    this.ctx.fillStyle = this.victory ? '#2ecc71' : '#e74c3c';
+                    this.ctx.fillStyle = (this.gameState === 'LEVEL_COMPLETE') ? '#2ecc71' : '#e74c3c';
                     this.ctx.font = '40px sans-serif';
                     this.ctx.textAlign = 'center';
                     this.ctx.fillText(this.gameMessage, this.width / 2, this.height / 2);
 
-                    if (!this.victory && this.gameOver) {
-                        this.ctx.fillStyle = 'white';
-                        this.ctx.font = '20px sans-serif';
-                        this.ctx.fillText("Restarting...", this.width / 2, this.height / 2 + 50);
-                    }
                     this.ctx.restore();
                 }
             }
