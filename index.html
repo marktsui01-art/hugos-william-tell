@@ -505,10 +505,11 @@
 
                 // Pupils
                 ctx.fillStyle = '#2c3e50';
-                // Depending on aim angle, move pupils slightly?
-                // Simple centered for now
-                ctx.fillRect(-8, -8, 4, 4);
-                ctx.fillRect(4, -8, 4, 4);
+                // Depending on aim angle, move pupils slightly
+                const pupilOffsetX = Math.cos(this.angle) * 1;
+                const pupilOffsetY = Math.sin(this.angle) * 1;
+                ctx.fillRect(-8 + pupilOffsetX, -8 + pupilOffsetY, 4, 4);
+                ctx.fillRect(4 + pupilOffsetX, -8 + pupilOffsetY, 4, 4);
 
                 // Mouth (Smile)
                 ctx.fillStyle = '#e74c3c';
